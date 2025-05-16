@@ -57,9 +57,27 @@ app.use(express.json());
 app.use(morgan('dev'));
 app.use(limiter);
 
+// Add a simple health check route
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    message: 'API is running',
+    env: process.env.NODE_ENV,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/notes', noteRoutes);
+
+// 404 handler for unmatched routes
+app.use((req, res, next) => {
+  console.log(`Route not found: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ 
+    message: 'Route not found',
+    path: req.originalUrl
+  });
+});
 
 // Socket.io connection handler
 io.on('connection', socketHandler);
