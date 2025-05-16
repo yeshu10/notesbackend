@@ -19,9 +19,30 @@ app.set('trust proxy', 1);
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: [process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app', 'http://localhost:5173'],
-    methods: ['GET', 'POST'],
-    credentials: true
+    origin: function(origin, callback) {
+      // Allow requests with no origin (like mobile apps, curl requests)
+      if (!origin) return callback(null, true);
+      
+      // Allowed origins
+      const allowedOrigins = [
+        process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app',
+        'http://localhost:5173'
+      ];
+      
+      // Allow any Vercel preview URL
+      if (origin.match(/^https:\/\/notesfrontend-.*\.vercel\.app$/)) {
+        return callback(null, true);
+      }
+      
+      // Check against allowed origins
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        return callback(null, true);
+      }
+      
+      callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET', 'POST']
   },
   allowEIO3: true,
   transports: ['websocket', 'polling']
@@ -38,7 +59,28 @@ const limiter = rateLimit({
 
 // Middleware
 app.use(cors({
-  origin: [process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app', 'http://localhost:5173'],
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allowed origins
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app',
+      'http://localhost:5173'
+    ];
+    
+    // Allow any Vercel preview URL
+    if (origin.match(/^https:\/\/notesfrontend-.*\.vercel\.app$/)) {
+      return callback(null, true);
+    }
+    
+    // Check against allowed origins
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
