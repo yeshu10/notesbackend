@@ -42,7 +42,7 @@ const io = new Server(httpServer, {
       callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
-    methods: ['GET', 'POST']
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
   },
   allowEIO3: true,
   transports: ['websocket', 'polling']
