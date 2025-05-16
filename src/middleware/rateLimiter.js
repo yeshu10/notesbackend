@@ -1,5 +1,6 @@
 import rateLimit from 'express-rate-limit';
 
+app.set('trust proxy', 1);
 // Create a limiter that allows 100 requests per 15 minutes per IP
 export const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
