@@ -97,8 +97,39 @@ app.use(cors({
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 }));
+
+// Additional middleware specifically for OPTIONS requests
+app.options('*', (req, res) => {
+  const origin = req.headers.origin;
+  if (origin?.match(/^https:\/\/notesfrontend-.*\.vercel\.app$/) || 
+      origin === process.env.FRONTEND_URL || 
+      origin === 'http://localhost:5173') {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.status(200).send();
+  } else {
+    res.status(403).send('CORS not allowed');
+  }
+});
+
+// Additional custom CORS headers middleware (ensures headers are set for all responses)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin?.match(/^https:\/\/notesfrontend-.*\.vercel\.app$/) || 
+      origin === process.env.FRONTEND_URL || 
+      origin === 'http://localhost:5173') {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
+  next();
+});
+
 app.use(express.json());
 app.use(morgan('dev'));
 app.use(limiter);
