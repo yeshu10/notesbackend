@@ -20,14 +20,19 @@ connectDB();
 // Connect to database
 
 const app = express();
+// Trust proxy (needed for cloud environments like Render)
+app.set('trust proxy', 1);
 const httpServer = createServer(app);
 
 // Socket.io setup
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST']
-  }
+    origin: [process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app', 'http://localhost:5173'],
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  allowEIO3: true,
+  transports: ['websocket', 'polling']
 });
 
 // Initialize socket handler with io instance
@@ -36,11 +41,18 @@ initializeSocket(io);
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 100, // limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  trustProxy: true // Trust X-Forwarded-For header
 });
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: [process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app', 'http://localhost:5173'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
 app.use(express.json());
 app.use(morgan('dev'));
 app.use(limiter);
