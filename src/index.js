@@ -6,6 +6,7 @@ import { Server } from 'socket.io';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import rateLimit from 'express-rate-limit';
+import connectDB from './config/db.js';
 
 import authRoutes from './routes/auth.js';
 import noteRoutes from './routes/notes.js';
@@ -148,13 +149,15 @@ app.use((req, res, next) => {
 // Socket.io
 io.on('connection', socketHandler);
 
-// MongoDB connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/collaborative-notes')
-  .then(() => console.log('Connected to MongoDB'))
-  .catch((err) => console.error('MongoDB connection error:', err));
 
-// Start server
-const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-}); 
+
+connectDB().then(() => {
+  // Start server **only after DB connection is successful**
+  const PORT = process.env.PORT || 5000;
+  httpServer.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}).catch((err) => {
+  console.error('Failed to connect to MongoDB:', err);
+  process.exit(1);
+});
