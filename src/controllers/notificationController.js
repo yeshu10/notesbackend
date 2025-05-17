@@ -1,8 +1,6 @@
 import Notification from '../models/Notification.js';
 
-// @desc    Get user's notifications
-// @route   GET /api/notifications
-// @access  Private
+
 export const getNotifications = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
@@ -39,9 +37,7 @@ export const getNotifications = async (req, res) => {
     }
 };
 
-// @desc    Mark notifications as read
-// @route   PATCH /api/notifications/read
-// @access  Private
+
 export const markNotificationsRead = async (req, res) => {
     try {
         const { notificationIds } = req.body;
@@ -65,9 +61,7 @@ export const markNotificationsRead = async (req, res) => {
     }
 };
 
-// @desc    Delete notifications
-// @route   DELETE /api/notifications
-// @access  Private
+
 export const deleteNotifications = async (req, res) => {
     try {
         const { notificationIds } = req.body;

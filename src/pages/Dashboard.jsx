@@ -19,7 +19,7 @@ const Dashboard = () => {
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  // Flag to prevent duplicate fetches
+  
   const [isFetching, setIsFetching] = useState(false);
 
   // Ensure socket is connected when dashboard loads

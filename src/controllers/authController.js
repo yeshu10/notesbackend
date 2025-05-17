@@ -1,20 +1,18 @@
 import User from '../models/User.js';
 import { generateToken } from '../middleware/auth.js';
 
-// @desc    Register a new user
-// @route   POST /api/auth/register
-// @access  Public
+
 export const register = async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    // Check if user already exists
+    
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ message: 'Email already registered' });
     }
 
-    // Create new user
+    
     const user = new User({
       name,
       email,
@@ -23,7 +21,7 @@ export const register = async (req, res) => {
 
     await user.save();
 
-    // Generate token
+    // Generating token
     const token = generateToken(user._id);
 
     res.status(201).json({
@@ -40,9 +38,7 @@ export const register = async (req, res) => {
   }
 };
 
-// @desc    Login user
-// @route   POST /api/auth/login
-// @access  Public
+
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
