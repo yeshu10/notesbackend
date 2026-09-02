@@ -6,16 +6,35 @@ import {
   createNote,
   updateNote,
   deleteNote,
-  shareNote
+  restoreNote,
+  emptyTrash,
+  shareNote,
+  removeCollaborator,
+  searchUsers,
+  getUserTags
 } from '../controllers/noteController.js';
 
 const router = express.Router();
 
+// General note list & creation
 router.get('/', auth, getNotes);
 router.post('/', auth, createNote);
+
+// Tags & User search
+router.get('/tags', auth, getUserTags);
+router.get('/users/search', auth, searchUsers);
+
+// Trash management
+router.delete('/trash/empty', auth, emptyTrash);
+
+// Specific note operation routes
 router.get('/:id', auth, getNote);
 router.patch('/:id', auth, updateNote);
 router.delete('/:id', auth, deleteNote);
-router.post('/:id/share', auth, shareNote);
+router.patch('/:id/restore', auth, restoreNote);
 
-export default router; 
+// Sharing & Collaborator management
+router.post('/:id/share', auth, shareNote);
+router.delete('/:id/share/:collaboratorId', auth, removeCollaborator);
+
+export default router;

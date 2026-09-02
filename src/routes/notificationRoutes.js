@@ -1,5 +1,5 @@
 import express from 'express';
-import { protect } from '../middleware/authMiddleware.js';
+import { protect } from '../middleware/auth.js';
 import { apiLimiter } from '../middleware/rateLimiter.js';
 import {
     getNotifications,
@@ -21,4 +21,4 @@ router.route('/')
 
 router.patch('/read', markNotificationsRead);
 
-export default router; 
+export default router;

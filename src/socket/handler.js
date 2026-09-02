@@ -1,8 +1,12 @@
 import jwt from 'jsonwebtoken';
 import Note from '../models/Note.js';
+import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 
 let io;
+
+// Map of noteId -> Map of socketId -> { socketId, userId, name, email }
+const roomPresence = new Map();
 
 export const initializeSocket = (socketIo) => {
   io = socketIo;
@@ -12,20 +16,39 @@ export const initializeSocket = (socketIo) => {
 const safeIdEquals = (id1, id2) => {
   if (!id1 || !id2) return false;
   try {
-    // Try using the equals method first (MongoDB ObjectId)
     if (id1.equals && typeof id1.equals === 'function') {
       return id1.equals(id2);
     }
-    // Then try string comparison
     return String(id1) === String(id2);
   } catch (error) {
-    console.error('Error comparing IDs:', error);
-    // Fallback to string comparison
     return String(id1) === String(id2);
   }
 };
 
+const broadcastPresence = (noteId) => {
+  if (!io) return;
+  const presenceMap = roomPresence.get(String(noteId));
+  const activeUsers = presenceMap ? Array.from(presenceMap.values()) : [];
+
+  // De-duplicate users by userId for clean avatar list
+  const uniqueUsers = [];
+  const seen = new Set();
+  for (const user of activeUsers) {
+    if (!seen.has(user.userId)) {
+      seen.add(user.userId);
+      uniqueUsers.push(user);
+    }
+  }
+
+  io.to(`note:${noteId}`).emit('room-presence-updated', {
+    noteId,
+    activeUsers: uniqueUsers
+  });
+};
+
 export const socketHandler = async (socket) => {
+  let authenticatedUser = null;
+
   try {
     // Authenticate socket connection
     const token = socket.handshake.auth.token;
@@ -38,41 +61,49 @@ export const socketHandler = async (socket) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
     const userId = decoded.userId;
 
-    console.log('Socket connected:', { userId, socketId: socket.id });
-    socket.join(`user:${userId}`);
+    const userDoc = await User.findById(userId).select('name email _id');
+    if (!userDoc) {
+      socket.disconnect();
+      return;
+    }
+
+    authenticatedUser = {
+      socketId: socket.id,
+      userId: userDoc._id.toString(),
+      name: userDoc.name,
+      email: userDoc.email
+    };
+
+    console.log('Socket connected:', { userId: authenticatedUser.userId, name: authenticatedUser.name });
+    socket.join(`user:${authenticatedUser.userId}`);
 
     // Join note room
     socket.on('join-note', async (noteId) => {
       try {
-        console.log('Join note request:', { userId, noteId });
-        
+        if (!noteId) return;
+
         const note = await Note.findById(noteId)
-          .populate('createdBy', 'name email')
-          .populate('collaborators.userId', 'name email');
+          .populate('createdBy', 'name email _id')
+          .populate('collaborators.userId', 'name email _id');
 
-        if (!note) {
-          console.log('Note not found:', noteId);
-          return;
-        }
+        if (!note) return;
 
-        // More reliable access check using helper function
-        const isCreator = safeIdEquals(note.createdBy._id, userId);
-        const collaborator = note.collaborators.find(c => safeIdEquals(c.userId._id, userId));
+        const isCreator = safeIdEquals(note.createdBy, authenticatedUser.userId);
+        const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, authenticatedUser.userId));
         const hasAccess = isCreator || collaborator;
-
-        console.log('Socket room join check:', {
-          noteId,
-          userId,
-          isCreator,
-          hasCollaboratorAccess: !!collaborator,
-          hasAccess
-        });
 
         if (hasAccess) {
           socket.join(`note:${noteId}`);
-          console.log('User joined note room:', { userId, noteId });
-        } else {
-          console.log('Access denied to note:', { userId, noteId });
+
+          // Add to room presence
+          const noteKey = String(noteId);
+          if (!roomPresence.has(noteKey)) {
+            roomPresence.set(noteKey, new Map());
+          }
+          roomPresence.get(noteKey).set(socket.id, authenticatedUser);
+
+          broadcastPresence(noteId);
+          console.log(`User ${authenticatedUser.name} joined room note:${noteId}`);
         }
       } catch (error) {
         console.error('Error joining note room:', error);
@@ -81,73 +112,76 @@ export const socketHandler = async (socket) => {
 
     // Leave note room
     socket.on('leave-note', (noteId) => {
+      if (!noteId) return;
       socket.leave(`note:${noteId}`);
-      console.log('User left note room:', { userId, noteId });
+
+      const noteKey = String(noteId);
+      if (roomPresence.has(noteKey)) {
+        roomPresence.get(noteKey).delete(socket.id);
+        if (roomPresence.get(noteKey).size === 0) {
+          roomPresence.delete(noteKey);
+        } else {
+          broadcastPresence(noteId);
+        }
+      }
     });
 
-    // Handle note updates
+    // Handle note real-time updates
     socket.on('note-update', async ({ noteId, content, title }) => {
       try {
+        if (!noteId) return;
         const note = await Note.findById(noteId)
-          .populate('createdBy', 'name email')
-          .populate('collaborators.userId', 'name email');
+          .populate('createdBy', 'name email _id')
+          .populate('collaborators.userId', 'name email _id');
 
-        if (!note) {
-          console.log('Note not found for update:', noteId);
-          return;
-        }
+        if (!note) return;
 
-        // Check write permission more reliably
-        const isCreator = safeIdEquals(note.createdBy._id, userId);
-        const collaborator = note.collaborators.find(c => safeIdEquals(c.userId._id, userId));
-        const canWrite = isCreator || (collaborator && collaborator.permission === 'write');
+        const isCreator = safeIdEquals(note.createdBy, authenticatedUser.userId);
+        const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, authenticatedUser.userId));
+        const canWrite = isCreator || (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor'));
 
-        console.log('Socket write check:', {
-          noteId,
-          userId,
-          isCreator,
-          collaboratorInfo: collaborator ? {
-            id: collaborator.userId._id.toString(),
-            permission: collaborator.permission
-          } : null,
-          canWrite
-        });
+        if (!canWrite) return;
 
-        if (!canWrite) {
-          console.log('Write access denied for real-time update:', { userId, noteId });
-          return;
-        }
-
-        // Update note in database
-        note.content = content;
-        if (title) note.title = title;
+        // Update note fields
+        if (content !== undefined) note.content = content;
+        if (title !== undefined) note.title = title.trim() || 'Untitled Note';
         note.lastUpdated = new Date();
         await note.save();
 
-        // Broadcast to all users in the note room except sender
+        // Broadcast update to other users in note room
         socket.to(`note:${noteId}`).emit('note-updated', {
           _id: noteId,
           content,
           title,
-          lastUpdated: note.lastUpdated
+          lastUpdated: note.lastUpdated,
+          updatedBy: {
+            id: authenticatedUser.userId,
+            name: authenticatedUser.name
+          }
         });
 
-        // Notify collaborators about the update (excluding the user who made the change)
-        notifyCollaborators(
-          noteId, 
-          `Note "${note.title}" was updated by ${collaborator ? collaborator.userId.name : note.createdBy.name}`, 
-          userId
-        );
-
-        console.log('Note updated in real-time:', { noteId, updatedBy: userId });
       } catch (error) {
         console.error('Error updating note in real-time:', error);
       }
     });
 
+    // Clean up on disconnect
     socket.on('disconnect', () => {
-      socket.leave(`user:${userId}`);
-      console.log('Socket disconnected:', { userId, socketId: socket.id });
+      if (authenticatedUser) {
+        socket.leave(`user:${authenticatedUser.userId}`);
+
+        // Remove socket from all room presences
+        for (const [noteId, presenceMap] of roomPresence.entries()) {
+          if (presenceMap.has(socket.id)) {
+            presenceMap.delete(socket.id);
+            if (presenceMap.size === 0) {
+              roomPresence.delete(noteId);
+            } else {
+              broadcastPresence(noteId);
+            }
+          }
+        }
+      }
     });
 
   } catch (error) {
@@ -158,71 +192,41 @@ export const socketHandler = async (socket) => {
 
 // Function to notify collaborators
 export const notifyCollaborators = async (noteId, message, excludeUserId, type = 'update', specificUserIds = null) => {
-  if (!io) {
-    console.warn('Socket.io not initialized');
-    return;
-  }
+  if (!io) return;
 
   try {
     const note = await Note.findById(noteId)
       .populate('collaborators.userId', '_id name email')
       .populate('createdBy', '_id name email');
 
-    if (!note) {
-      console.warn('Note not found for notification:', noteId);
-      return;
-    }
-
-    console.log('Sending notification about note:', {
-      noteId,
-      message,
-      excludeUserId: excludeUserId?.toString(),
-      type,
-      specificUserIds: specificUserIds ? specificUserIds.map(id => id.toString()) : null,
-      creatorId: note.createdBy?._id?.toString(),
-      collaboratorIds: note.collaborators.map(c => c.userId?._id?.toString())
-    });
+    if (!note) return;
 
     let usersToNotify = [];
-    
-    // If specific user IDs were provided (like for share notifications)
+
     if (specificUserIds && specificUserIds.length > 0) {
-      // Get only the specific users we want to notify
       const allPossibleUsers = [
         note.createdBy,
         ...note.collaborators.map(c => c.userId)
       ].filter(Boolean);
-      
-      usersToNotify = allPossibleUsers.filter(user => 
-        specificUserIds.some(id => user._id.equals(id))
+
+      usersToNotify = allPossibleUsers.filter(user =>
+        specificUserIds.some(id => safeIdEquals(user._id || user, id))
       );
-    }
-    // Otherwise notify all collaborators except the one who triggered the action
-    else {
+    } else {
       usersToNotify = [
-        ...(note.createdBy?._id && !note.createdBy._id.equals(excludeUserId) ? [note.createdBy] : []),
+        ...(note.createdBy && !safeIdEquals(note.createdBy, excludeUserId) ? [note.createdBy] : []),
         ...note.collaborators
-          .filter(c => c.userId && !c.userId._id.equals(excludeUserId))
+          .filter(c => c.userId && !safeIdEquals(c.userId, excludeUserId))
           .map(c => c.userId)
       ];
     }
 
-    if (usersToNotify.length === 0) {
-      console.log('No users to notify');
-      return;
-    }
+    if (usersToNotify.length === 0) return;
 
-    console.log('Sending notifications to users:', usersToNotify.map(u => ({
-      userId: u._id.toString(),
-      name: u.name,
-      email: u.email
-    })));
-
-    // Create notifications in database
     const notifications = await Promise.all(
-      usersToNotify.map(user => 
+      usersToNotify.map(user =>
         new Notification({
-          userId: user._id,
+          userId: user._id || user,
           noteId,
           message,
           type
@@ -230,12 +234,11 @@ export const notifyCollaborators = async (noteId, message, excludeUserId, type =
       )
     );
 
-    // Emit to each user's room
     usersToNotify.forEach(user => {
-      const userNotification = notifications.find(n => n.userId.equals(user._id));
+      const uid = user._id || user;
+      const userNotification = notifications.find(n => safeIdEquals(n.userId, uid));
       if (userNotification) {
-        console.log(`Emitting notification to user:${user._id}`);
-        io.to(`user:${user._id}`).emit('notification', {
+        io.to(`user:${uid}`).emit('notification', {
           _id: userNotification._id,
           message,
           noteId,
@@ -247,4 +250,4 @@ export const notifyCollaborators = async (noteId, message, excludeUserId, type =
   } catch (error) {
     console.error('Error sending notifications:', error);
   }
-}; 
+};
