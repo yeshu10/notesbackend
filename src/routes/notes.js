@@ -11,7 +11,10 @@ import {
   shareNote,
   removeCollaborator,
   searchUsers,
-  getUserTags
+  getUserTags,
+  getNoteVersions,
+  getNoteVersion,
+  restoreNoteVersion
 } from '../controllers/noteController.js';
 
 const router = express.Router();
@@ -32,6 +35,11 @@ router.get('/:id', auth, getNote);
 router.patch('/:id', auth, updateNote);
 router.delete('/:id', auth, deleteNote);
 router.patch('/:id/restore', auth, restoreNote);
+
+// Version History routes
+router.get('/:id/versions', auth, getNoteVersions);
+router.get('/:id/versions/:versionId', auth, getNoteVersion);
+router.post('/:id/versions/:versionId/restore', auth, restoreNoteVersion);
 
 // Sharing & Collaborator management
 router.post('/:id/share', auth, shareNote);

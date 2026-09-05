@@ -6,6 +6,10 @@ const notificationSchema = new mongoose.Schema({
         ref: 'User',
         required: true
     },
+    senderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
     noteId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Note',
@@ -17,8 +21,11 @@ const notificationSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['update', 'share', 'archive'],
-        required: true
+        enum: [
+            'update', 'share', 'archive', 'permission_change', 'restored',
+            'NOTE_SHARED', 'PERMISSION_CHANGED', 'NOTE_EDITED', 'NOTE_RESTORED'
+        ],
+        default: 'update'
     },
     read: {
         type: Boolean,

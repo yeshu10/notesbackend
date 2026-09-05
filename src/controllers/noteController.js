@@ -1,7 +1,8 @@
 import Note from '../models/Note.js';
+import NoteVersion from '../models/NoteVersion.js';
 import User from '../models/User.js';
 import mongoose from 'mongoose';
-import { notifyCollaborators } from '../socket/handler.js';
+import { notifyCollaborators, saveNoteVersionAndNotify, getIO } from '../socket/handler.js';
 
 const safeIdEquals = (id1, id2) => {
   if (!id1 || !id2) return false;
@@ -236,11 +237,17 @@ export const updateNote = async (req, res) => {
       return res.status(403).json({ message: 'Write access denied. You only have viewing permissions.' });
     }
 
-    const { title, content, tags, color, isPinned, isFavorite, isArchived, isTrashed } = req.body;
+    const { title, content, tags, color, isPinned, isFavorite, isArchived, isTrashed, forceNewVersion, sessionId } = req.body;
+
+    const newTitle = title !== undefined ? title.trim() || 'Untitled Note' : note.title;
+    const newContent = content !== undefined ? content : note.content;
+
+    // Check if content or title changed meaningfully
+    const hasContentOrTitleChanged = (newTitle !== note.title) || (newContent !== note.content);
 
     const updateFields = {};
-    if (title !== undefined) updateFields.title = title.trim() || 'Untitled Note';
-    if (content !== undefined) updateFields.content = content;
+    if (title !== undefined) updateFields.title = newTitle;
+    if (content !== undefined) updateFields.content = newContent;
     if (tags !== undefined && Array.isArray(tags)) {
       updateFields.tags = tags.map(t => String(t).trim()).filter(Boolean);
     }
@@ -267,11 +274,39 @@ export const updateNote = async (req, res) => {
       .populate('createdBy', 'name email _id')
       .populate('collaborators.userId', 'name email _id');
 
+    // Save version snapshot and notify collaborators only if content or title changed
+    if (hasContentOrTitleChanged) {
+      await saveNoteVersionAndNotify({
+        noteId: updatedNote._id,
+        title: updatedNote.title,
+        content: updatedNote.content,
+        userId,
+        userName: req.user.name,
+        changeType: 'updated',
+        forceNewVersion: !!forceNewVersion,
+        sessionId
+      });
+
+      // Broadcast update to real-time room subscribers if io is initialized
+      const io = getIO();
+      if (io) {
+        io.to(`note:${updatedNote._id}`).emit('note-updated', {
+          _id: updatedNote._id,
+          content: updatedNote.content,
+          title: updatedNote.title,
+          tags: updatedNote.tags,
+          lastUpdated: updatedNote.lastUpdated,
+          updatedBy: {
+            id: userId.toString(),
+            name: req.user.name
+          }
+        });
+      }
+    }
+
     const responseNote = updatedNote.toObject();
     responseNote.isOwnedByCurrentUser = isCreator;
     responseNote.userPermission = isCreator ? 'owner' : (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor') ? 'editor' : 'viewer');
-
-    notifyCollaborators(updatedNote._id, `Note "${updatedNote.title}" was updated by ${req.user.name}`, userId);
 
     res.json(responseNote);
   } catch (error) {
@@ -370,6 +405,7 @@ export const shareNote = async (req, res) => {
 
     // Normalize permission to 'write' or 'read' for internal schema while returning friendly names
     const normalizedPerm = (permission === 'editor' || permission === 'write') ? 'write' : 'read';
+    const readablePermName = normalizedPerm === 'write' ? 'Editor' : 'Viewer';
 
     const note = await Note.findById(req.params.id)
       .populate('createdBy', 'name email _id')
@@ -398,13 +434,21 @@ export const shareNote = async (req, res) => {
       c.userId && c.userId._id.equals(collaborator._id)
     );
 
+    let notifMessage = '';
+    let notifType = 'NOTE_SHARED';
+
     if (existingIndex !== -1) {
+      const oldPerm = (note.collaborators[existingIndex].permission === 'write' || note.collaborators[existingIndex].permission === 'editor') ? 'Editor' : 'Viewer';
       note.collaborators[existingIndex].permission = normalizedPerm;
+      notifMessage = `Your access to "${note.title}" was changed from ${oldPerm} to ${readablePermName}.`;
+      notifType = 'PERMISSION_CHANGED';
     } else {
       note.collaborators.push({
         userId: collaborator._id,
         permission: normalizedPerm
       });
+      notifMessage = `${req.user.name} shared "${note.title}" with you (${readablePermName} access).`;
+      notifType = 'NOTE_SHARED';
     }
 
     await note.save();
@@ -413,9 +457,9 @@ export const shareNote = async (req, res) => {
 
     notifyCollaborators(
       note._id,
-      `You were given ${normalizedPerm === 'write' ? 'Editor' : 'Viewer'} access to "${note.title}" by ${req.user.name}`,
+      notifMessage,
       req.user._id,
-      'share',
+      notifType,
       [collaborator._id]
     );
 
@@ -501,5 +545,160 @@ export const getUserTags = async (req, res) => {
   } catch (error) {
     console.error('Get user tags error:', error);
     res.status(500).json({ message: 'Error fetching tags', error: error.message });
+  }
+};
+
+// --- VERSION HISTORY CONTROLLERS ---
+
+// Get version history for a note
+export const getNoteVersions = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const note = await Note.findById(req.params.id);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const userId = req.user._id;
+    const isCreator = safeIdEquals(note.createdBy, userId);
+    const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, userId));
+    const hasAccess = isCreator || collaborator;
+
+    if (!hasAccess) {
+      return res.status(403).json({ message: 'Access denied to version history' });
+    }
+
+    const versions = await NoteVersion.find({ noteId: req.params.id })
+      .sort({ versionNumber: -1 })
+      .populate('editedBy', 'name email _id');
+
+    res.json(versions);
+  } catch (error) {
+    console.error('Get note versions error:', error);
+    res.status(500).json({ message: 'Error fetching version history', error: error.message });
+  }
+};
+
+// Get a specific version details
+export const getNoteVersion = async (req, res) => {
+  try {
+    const { id, versionId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(versionId)) {
+      return res.status(404).json({ message: 'Version or note not found' });
+    }
+
+    const note = await Note.findById(id);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const userId = req.user._id;
+    const isCreator = safeIdEquals(note.createdBy, userId);
+    const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, userId));
+    const hasAccess = isCreator || collaborator;
+
+    if (!hasAccess) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const version = await NoteVersion.findOne({ _id: versionId, noteId: id })
+      .populate('editedBy', 'name email _id');
+
+    if (!version) {
+      return res.status(404).json({ message: 'Version not found' });
+    }
+
+    res.json(version);
+  } catch (error) {
+    console.error('Get note version error:', error);
+    res.status(500).json({ message: 'Error fetching version details', error: error.message });
+  }
+};
+
+// Restore a specific version
+export const restoreNoteVersion = async (req, res) => {
+  try {
+    const { id, versionId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(versionId)) {
+      return res.status(404).json({ message: 'Version or note not found' });
+    }
+
+    const note = await Note.findById(id);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const userId = req.user._id;
+    const isCreator = safeIdEquals(note.createdBy, userId);
+    const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, userId));
+
+    const canWrite = isCreator ||
+      (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor'));
+
+    if (!canWrite) {
+      return res.status(403).json({ message: 'Write access denied. Viewers cannot restore versions.' });
+    }
+
+    const targetVersion = await NoteVersion.findOne({ _id: versionId, noteId: id });
+    if (!targetVersion) {
+      return res.status(404).json({ message: 'Version to restore not found' });
+    }
+
+    // 1. Update current note content and title
+    note.title = targetVersion.title || 'Untitled Note';
+    note.content = targetVersion.content || '';
+    note.lastUpdated = new Date();
+    await note.save();
+
+    // 2. Create a new version entry preserving the history
+    const versionCount = await NoteVersion.countDocuments({ noteId: id });
+    const restoredVersion = await NoteVersion.create({
+      noteId: id,
+      title: note.title,
+      content: note.content,
+      editedBy: userId,
+      versionNumber: versionCount + 1,
+      changeType: 'restored'
+    });
+
+    await note.populate('createdBy', 'name email _id');
+    await note.populate('collaborators.userId', 'name email _id');
+
+    // Notify collaborators
+    notifyCollaborators(
+      id,
+      `${req.user.name} restored a previous version of "${note.title}"`,
+      userId,
+      'NOTE_RESTORED'
+    );
+
+    // Broadcast restored note to connected room subscribers in real-time
+    const io = getIO();
+    if (io) {
+      io.to(`note:${id}`).emit('note-updated', {
+        _id: id,
+        content: note.content,
+        title: note.title,
+        tags: note.tags,
+        lastUpdated: note.lastUpdated,
+        updatedBy: {
+          id: userId.toString(),
+          name: req.user.name
+        }
+      });
+    }
+
+    const responseNote = note.toObject();
+    responseNote.isOwnedByCurrentUser = isCreator;
+    responseNote.userPermission = isCreator ? 'owner' : 'editor';
+    responseNote.restoredVersion = restoredVersion;
+
+    res.json(responseNote);
+  } catch (error) {
+    console.error('Restore note version error:', error);
+    res.status(500).json({ message: 'Error restoring version', error: error.message });
   }
 };

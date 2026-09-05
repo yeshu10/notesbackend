@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import Note from '../models/Note.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import NoteVersion from '../models/NoteVersion.js';
 
 let io;
 
@@ -44,6 +45,76 @@ const broadcastPresence = (noteId) => {
     noteId,
     activeUsers: uniqueUsers
   });
+};
+
+export const getIO = () => io;
+
+export const saveNoteVersionAndNotify = async ({
+  noteId,
+  title,
+  content,
+  userId,
+  userName,
+  changeType = 'updated',
+  forceNewVersion = false,
+  sessionId = null
+}) => {
+  try {
+    const latestVersion = await NoteVersion.findOne({ noteId }).sort({ versionNumber: -1 });
+
+    if (latestVersion) {
+      // Avoid creating duplicate version if content and title are identical to latest version
+      if (latestVersion.title === title && latestVersion.content === content) {
+        return { version: latestVersion, isNewVersion: false };
+      }
+
+      // Strictly check if edits belong to the exact same editing session
+      let isSameSession = false;
+      if (sessionId && latestVersion.sessionId) {
+        isSameSession = (latestVersion.sessionId === sessionId);
+      } else {
+        const timeThreshold = 5 * 1000; // 5s fallback if no sessionId provided
+        isSameSession = (Date.now() - new Date(latestVersion.updatedAt || latestVersion.createdAt).getTime() < timeThreshold);
+      }
+
+      const canUpdateInPlace =
+        !forceNewVersion &&
+        isSameSession &&
+        latestVersion.changeType === 'updated' &&
+        latestVersion.editedBy.toString() === userId.toString() &&
+        changeType === 'updated';
+
+      if (canUpdateInPlace) {
+        latestVersion.title = title;
+        latestVersion.content = content;
+        await latestVersion.save();
+        return { version: latestVersion, isNewVersion: false };
+      }
+    }
+
+    const versionCount = await NoteVersion.countDocuments({ noteId });
+    const newVersion = await NoteVersion.create({
+      noteId,
+      title,
+      content,
+      editedBy: userId,
+      versionNumber: versionCount + 1,
+      changeType,
+      sessionId
+    });
+
+    const actionText = changeType === 'restored' ? 'restored a previous version of' : 'edited';
+    await notifyCollaborators(
+      noteId,
+      `${userName} ${actionText} "${title}"`,
+      userId,
+      changeType === 'restored' ? 'NOTE_RESTORED' : 'NOTE_EDITED'
+    );
+
+    return { version: newVersion, isNewVersion: true };
+  } catch (error) {
+    console.error('Error saving note version / notifying:', error);
+  }
 };
 
 export const socketHandler = async (socket) => {
@@ -127,7 +198,7 @@ export const socketHandler = async (socket) => {
     });
 
     // Handle note real-time updates
-    socket.on('note-update', async ({ noteId, content, title }) => {
+    socket.on('note-update', async ({ noteId, content, title, sessionId }) => {
       try {
         if (!noteId) return;
         const note = await Note.findById(noteId)
@@ -142,17 +213,33 @@ export const socketHandler = async (socket) => {
 
         if (!canWrite) return;
 
+        const newTitle = title !== undefined ? title.trim() || 'Untitled Note' : note.title;
+        const newContent = content !== undefined ? content : note.content;
+        const hasContentOrTitleChanged = (newTitle !== note.title) || (newContent !== note.content);
+
         // Update note fields
-        if (content !== undefined) note.content = content;
-        if (title !== undefined) note.title = title.trim() || 'Untitled Note';
+        if (content !== undefined) note.content = newContent;
+        if (title !== undefined) note.title = newTitle;
         note.lastUpdated = new Date();
         await note.save();
+
+        if (hasContentOrTitleChanged) {
+          await saveNoteVersionAndNotify({
+            noteId: note._id,
+            title: note.title,
+            content: note.content,
+            userId: authenticatedUser.userId,
+            userName: authenticatedUser.name,
+            changeType: 'updated',
+            sessionId
+          });
+        }
 
         // Broadcast update to other users in note room
         socket.to(`note:${noteId}`).emit('note-updated', {
           _id: noteId,
-          content,
-          title,
+          content: note.content,
+          title: note.title,
           lastUpdated: note.lastUpdated,
           updatedBy: {
             id: authenticatedUser.userId,
@@ -192,8 +279,6 @@ export const socketHandler = async (socket) => {
 
 // Function to notify collaborators
 export const notifyCollaborators = async (noteId, message, excludeUserId, type = 'update', specificUserIds = null) => {
-  if (!io) return;
-
   try {
     const note = await Note.findById(noteId)
       .populate('collaborators.userId', '_id name email')
@@ -227,6 +312,7 @@ export const notifyCollaborators = async (noteId, message, excludeUserId, type =
       usersToNotify.map(user =>
         new Notification({
           userId: user._id || user,
+          senderId: excludeUserId || null,
           noteId,
           message,
           type
@@ -234,19 +320,22 @@ export const notifyCollaborators = async (noteId, message, excludeUserId, type =
       )
     );
 
-    usersToNotify.forEach(user => {
-      const uid = user._id || user;
-      const userNotification = notifications.find(n => safeIdEquals(n.userId, uid));
-      if (userNotification) {
-        io.to(`user:${uid}`).emit('notification', {
-          _id: userNotification._id,
-          message,
-          noteId,
-          type,
-          timestamp: new Date()
-        });
-      }
-    });
+    if (io) {
+      usersToNotify.forEach(user => {
+        const uid = user._id || user;
+        const userNotification = notifications.find(n => safeIdEquals(n.userId, uid));
+        if (userNotification) {
+          io.to(`user:${uid}`).emit('notification', {
+            _id: userNotification._id,
+            message,
+            noteId,
+            type,
+            read: false,
+            createdAt: userNotification.createdAt || new Date()
+          });
+        }
+      });
+    }
   } catch (error) {
     console.error('Error sending notifications:', error);
   }

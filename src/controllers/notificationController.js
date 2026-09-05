@@ -7,7 +7,7 @@ export const getNotifications = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const unreadOnly = req.query.unreadOnly === 'true';
 
-        const query = { 
+        const query = {
             userId: req.user._id,
             ...(unreadOnly ? { read: false } : {})
         };
@@ -40,19 +40,14 @@ export const getNotifications = async (req, res) => {
 
 export const markNotificationsRead = async (req, res) => {
     try {
-        const { notificationIds } = req.body;
+        const { notificationIds } = req.body || {};
 
-        if (!Array.isArray(notificationIds)) {
-            return res.status(400).json({ message: 'notificationIds must be an array' });
+        const query = { userId: req.user._id };
+        if (Array.isArray(notificationIds) && notificationIds.length > 0) {
+            query._id = { $in: notificationIds };
         }
 
-        await Notification.updateMany(
-            {
-                _id: { $in: notificationIds },
-                userId: req.user._id
-            },
-            { $set: { read: true } }
-        );
+        await Notification.updateMany(query, { $set: { read: true } });
 
         res.json({ message: 'Notifications marked as read' });
     } catch (error) {
@@ -64,16 +59,14 @@ export const markNotificationsRead = async (req, res) => {
 
 export const deleteNotifications = async (req, res) => {
     try {
-        const { notificationIds } = req.body;
+        const { notificationIds } = req.body || {};
 
-        if (!Array.isArray(notificationIds)) {
-            return res.status(400).json({ message: 'notificationIds must be an array' });
+        const query = { userId: req.user._id };
+        if (Array.isArray(notificationIds) && notificationIds.length > 0) {
+            query._id = { $in: notificationIds };
         }
 
-        await Notification.deleteMany({
-            _id: { $in: notificationIds },
-            userId: req.user._id
-        });
+        await Notification.deleteMany(query);
 
         res.json({ message: 'Notifications deleted successfully' });
     } catch (error) {
