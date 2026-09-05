@@ -9,8 +9,10 @@ import connectDB from './config/db.js';
 import authRoutes from './routes/auth.js';
 import noteRoutes from './routes/notes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
+import reminderRoutes from './routes/reminderRoutes.js';
 import { socketHandler, initializeSocket } from './socket/handler.js';
 import { initializeArchiver } from './cron/noteArchiver.js';
+import { initializeReminderScheduler } from './cron/reminderScheduler.js';
 import { globalLimiter } from './middleware/rateLimiter.js';
 
 
@@ -21,6 +23,7 @@ dotenv.config();
 connectDB();
 // Initialize cron jobs
 initializeArchiver();
+initializeReminderScheduler();
 
 const app = express();
 
@@ -134,6 +137,7 @@ app.get('/', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/notes', noteRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/reminders', reminderRoutes);
 
 // 404 handler for unmatched routes
 

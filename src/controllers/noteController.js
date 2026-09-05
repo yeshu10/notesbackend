@@ -1,5 +1,6 @@
 import Note from '../models/Note.js';
 import NoteVersion from '../models/NoteVersion.js';
+import Reminder from '../models/Reminder.js';
 import User from '../models/User.js';
 import mongoose from 'mongoose';
 import { notifyCollaborators, saveNoteVersionAndNotify, getIO } from '../socket/handler.js';
@@ -56,6 +57,17 @@ export const getNotes = async (req, res) => {
       query.isFavorite = true;
       query.isTrashed = false;
       query.isArchived = false;
+    } else if (filter === 'reminders') {
+      const activeReminders = await Reminder.find({
+        userId,
+        isActive: true,
+        isTriggered: false,
+        reminderAt: { $gt: new Date() }
+      }).select('noteId');
+
+      const reminderNoteIds = activeReminders.map(r => r.noteId);
+      query._id = { $in: reminderNoteIds };
+      query.isTrashed = false;
     } else {
       // 'all' default - active notes (not trashed, not archived)
       query.$or = [{ createdBy: userId }, { 'collaborators.userId': userId }];
@@ -337,10 +349,12 @@ export const deleteNote = async (req, res) => {
       note.isTrashed = true;
       note.trashedAt = new Date();
       await note.save();
+      await Reminder.updateMany({ noteId: req.params.id }, { isActive: false });
       return res.json({ message: 'Note moved to trash', softDeleted: true, noteId: note._id });
     }
 
     // If note is already in trash, delete permanently
+    await Reminder.deleteMany({ noteId: req.params.id });
     await note.deleteOne();
     res.json({ message: 'Note permanently deleted', softDeleted: false, noteId: req.params.id });
   } catch (error) {
@@ -372,6 +386,10 @@ export const restoreNote = async (req, res) => {
     note.lastUpdated = new Date();
 
     await note.save();
+    await Reminder.updateMany(
+      { noteId: req.params.id, reminderAt: { $gt: new Date() } },
+      { isActive: true, isTriggered: false }
+    );
     await note.populate('createdBy', 'name email _id');
     await note.populate('collaborators.userId', 'name email _id');
 
