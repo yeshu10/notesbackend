@@ -4,7 +4,6 @@ import morgan from 'morgan';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import dotenv from 'dotenv';
-import rateLimit from 'express-rate-limit';
 
 import connectDB from './config/db.js';
 import authRoutes from './routes/auth.js';
@@ -12,6 +11,8 @@ import noteRoutes from './routes/notes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import { socketHandler, initializeSocket } from './socket/handler.js';
 import { initializeArchiver } from './cron/noteArchiver.js';
+import { globalLimiter } from './middleware/rateLimiter.js';
+
 
 // Load env vars
 dotenv.config();
@@ -66,37 +67,20 @@ const io = new Server(httpServer, {
 // Initialize socket handler with io instance
 initializeSocket(io);
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: true // Trust X-Forwarded-For header
-});
-
 // Middleware
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl requests)
     if (!origin) return callback(null, true);
-
-    // Allowed origins
     const allowedOrigins = [
       process.env.FRONTEND_URL || 'https://notesfrontend-topaz.vercel.app',
       'http://localhost:5173'
     ];
-
-    // Allow any Vercel preview URL
     if (origin.match(/^https:\/\/notesfrontend-.*\.vercel\.app$/)) {
       return callback(null, true);
     }
-
-    // Check against allowed origins
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
-
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -119,7 +103,7 @@ app.options('*', (req, res) => {
   }
 });
 
-// Additional custom CORS headers middleware (ensures headers are set for all responses)
+// Custom CORS headers middleware (ensures headers are set for all responses)
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin?.match(/^https:\/\/notesfrontend-.*\.vercel\.app$/) ||
@@ -135,7 +119,7 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 app.use(morgan('dev'));
-app.use(limiter);
+app.use(globalLimiter);
 
 // Add a simple health check route
 app.get('/', (req, res) => {
@@ -175,6 +159,18 @@ app.use((err, req, res, next) => {
 
 // Start server
 const PORT = process.env.PORT || 5000;
+
+httpServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${PORT} is already in use by another Node process.`);
+    console.error(`👉 To free port ${PORT} on Windows PowerShell, run:`);
+    console.error(`   Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess -Force\n`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', err);
+  }
+});
+
 httpServer.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+  console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
 }); 
