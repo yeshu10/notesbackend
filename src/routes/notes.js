@@ -7,6 +7,8 @@ import {
   updateNote,
   deleteNote,
   restoreNote,
+  archiveNote,
+  unarchiveNote,
   emptyTrash,
   shareNote,
   removeCollaborator,
@@ -33,6 +35,8 @@ router.delete('/trash/empty', auth, emptyTrash);
 // Specific note operation routes
 router.get('/:id', auth, getNote);
 router.patch('/:id', auth, updateNote);
+router.patch('/:id/archive', auth, archiveNote);
+router.patch('/:id/unarchive', auth, unarchiveNote);
 router.delete('/:id', auth, deleteNote);
 router.patch('/:id/restore', auth, restoreNote);
 

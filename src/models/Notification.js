@@ -23,7 +23,8 @@ const notificationSchema = new mongoose.Schema({
         type: String,
         enum: [
             'update', 'share', 'archive', 'permission_change', 'restored',
-            'NOTE_SHARED', 'PERMISSION_CHANGED', 'NOTE_EDITED', 'NOTE_RESTORED', 'REMINDER'
+            'NOTE_SHARED', 'PERMISSION_CHANGED', 'NOTE_EDITED', 'NOTE_RESTORED', 'REMINDER',
+            'NOTE_COMMENT', 'COMMENT_REPLY'
         ],
         default: 'update'
     },

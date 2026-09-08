@@ -9,6 +9,19 @@ let io;
 // Map of noteId -> Map of socketId -> { socketId, userId, name, email }
 const roomPresence = new Map();
 
+// ─── Attachment event listeners (for AttachmentsSection real-time sync) ───────
+const attachmentAddedListeners = new Set();
+const attachmentDeletedListeners = new Set();
+
+export const subscribeToAttachments = ({ onAdded, onDeleted }) => {
+  if (onAdded) attachmentAddedListeners.add(onAdded);
+  if (onDeleted) attachmentDeletedListeners.add(onDeleted);
+  return () => {
+    if (onAdded) attachmentAddedListeners.delete(onAdded);
+    if (onDeleted) attachmentDeletedListeners.delete(onDeleted);
+  };
+};
+
 export const initializeSocket = (socketIo) => {
   io = socketIo;
 };
@@ -53,6 +66,8 @@ export const saveNoteVersionAndNotify = async ({
   noteId,
   title,
   content,
+  type = 'text',
+  checklistItems = [],
   userId,
   userName,
   changeType = 'updated',
@@ -63,8 +78,9 @@ export const saveNoteVersionAndNotify = async ({
     const latestVersion = await NoteVersion.findOne({ noteId }).sort({ versionNumber: -1 });
 
     if (latestVersion) {
-      // Avoid creating duplicate version if content and title are identical to latest version
-      if (latestVersion.title === title && latestVersion.content === content) {
+      const isChecklistSame = JSON.stringify(latestVersion.checklistItems || []) === JSON.stringify(checklistItems || []);
+      // Avoid creating duplicate version if content, title, type, and checklist items are identical to latest version
+      if (latestVersion.title === title && latestVersion.content === content && latestVersion.type === type && isChecklistSame) {
         return { version: latestVersion, isNewVersion: false };
       }
 
@@ -87,6 +103,8 @@ export const saveNoteVersionAndNotify = async ({
       if (canUpdateInPlace) {
         latestVersion.title = title;
         latestVersion.content = content;
+        latestVersion.type = type;
+        latestVersion.checklistItems = checklistItems;
         await latestVersion.save();
         return { version: latestVersion, isNewVersion: false };
       }
@@ -97,6 +115,8 @@ export const saveNoteVersionAndNotify = async ({
       noteId,
       title,
       content,
+      type,
+      checklistItems,
       editedBy: userId,
       versionNumber: versionCount + 1,
       changeType,
@@ -198,7 +218,7 @@ export const socketHandler = async (socket) => {
     });
 
     // Handle note real-time updates
-    socket.on('note-update', async ({ noteId, content, title, sessionId }) => {
+    socket.on('note-update', async ({ noteId, content, title, type, checklistItems, sessionId }) => {
       try {
         if (!noteId) return;
         const note = await Note.findById(noteId)
@@ -215,19 +235,27 @@ export const socketHandler = async (socket) => {
 
         const newTitle = title !== undefined ? title.trim() || 'Untitled Note' : note.title;
         const newContent = content !== undefined ? content : note.content;
-        const hasContentOrTitleChanged = (newTitle !== note.title) || (newContent !== note.content);
+        const newType = type !== undefined ? type : (note.type || 'text');
+        const newChecklistItems = checklistItems !== undefined ? checklistItems : (note.checklistItems || []);
+
+        const isChecklistChanged = checklistItems !== undefined && JSON.stringify(note.checklistItems) !== JSON.stringify(checklistItems);
+        const hasChanged = (newTitle !== note.title) || (newContent !== note.content) || (newType !== note.type) || isChecklistChanged;
 
         // Update note fields
         if (content !== undefined) note.content = newContent;
         if (title !== undefined) note.title = newTitle;
+        if (type !== undefined) note.type = newType;
+        if (checklistItems !== undefined) note.checklistItems = newChecklistItems;
         note.lastUpdated = new Date();
         await note.save();
 
-        if (hasContentOrTitleChanged) {
+        if (hasChanged) {
           await saveNoteVersionAndNotify({
             noteId: note._id,
             title: note.title,
             content: note.content,
+            type: note.type,
+            checklistItems: note.checklistItems,
             userId: authenticatedUser.userId,
             userName: authenticatedUser.name,
             changeType: 'updated',
@@ -240,6 +268,8 @@ export const socketHandler = async (socket) => {
           _id: noteId,
           content: note.content,
           title: note.title,
+          type: note.type,
+          checklistItems: note.checklistItems,
           lastUpdated: note.lastUpdated,
           updatedBy: {
             id: authenticatedUser.userId,

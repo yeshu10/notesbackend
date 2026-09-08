@@ -2,8 +2,10 @@ import Note from '../models/Note.js';
 import NoteVersion from '../models/NoteVersion.js';
 import Reminder from '../models/Reminder.js';
 import User from '../models/User.js';
+import Comment from '../models/Comment.js';
 import mongoose from 'mongoose';
 import { notifyCollaborators, saveNoteVersionAndNotify, getIO } from '../socket/handler.js';
+import { deleteAttachmentsForNote } from './attachmentController.js';
 
 const safeIdEquals = (id1, id2) => {
   if (!id1 || !id2) return false;
@@ -52,6 +54,7 @@ export const getNotes = async (req, res) => {
     } else if (filter === 'trash') {
       query.$or = [{ createdBy: userId }, { 'collaborators.userId': userId }];
       query.isTrashed = true;
+      query.isArchived = false;
     } else if (filter === 'favorites' || filter === 'saved') {
       query.$or = [{ createdBy: userId }, { 'collaborators.userId': userId }];
       query.isFavorite = true;
@@ -68,6 +71,7 @@ export const getNotes = async (req, res) => {
       const reminderNoteIds = activeReminders.map(r => r.noteId);
       query._id = { $in: reminderNoteIds };
       query.isTrashed = false;
+      query.isArchived = false;
     } else {
       // 'all' default - active notes (not trashed, not archived)
       query.$or = [{ createdBy: userId }, { 'collaborators.userId': userId }];
@@ -89,7 +93,8 @@ export const getNotes = async (req, res) => {
         $or: [
           { title: searchRegex },
           { content: searchRegex },
-          { tags: searchRegex }
+          { tags: searchRegex },
+          { 'checklistItems.text': searchRegex }
         ]
       });
     }
@@ -118,7 +123,17 @@ export const getNotes = async (req, res) => {
       .populate('createdBy', 'name email _id')
       .populate('collaborators.userId', 'name email _id');
 
-    // Attach permission info helper for each note
+    // Attach comment counts and permission info helper for each note
+    const noteIds = notes.map(n => n._id);
+    const commentCounts = await Comment.aggregate([
+      { $match: { noteId: { $in: noteIds }, isDeleted: false } },
+      { $group: { _id: '$noteId', count: { $sum: 1 } } }
+    ]);
+    const commentCountMap = {};
+    commentCounts.forEach(c => {
+      commentCountMap[String(c._id)] = c.count;
+    });
+
     const processedNotes = notes.map(note => {
       const noteObj = note.toObject();
       const isCreator = safeIdEquals(note.createdBy, userId);
@@ -128,6 +143,7 @@ export const getNotes = async (req, res) => {
       noteObj.userPermission = isCreator
         ? 'owner'
         : (collaborator ? (collaborator.permission === 'write' || collaborator.permission === 'editor' ? 'editor' : 'viewer') : 'viewer');
+      noteObj.commentCount = commentCountMap[String(note._id)] || 0;
 
       return noteObj;
     });
@@ -184,6 +200,9 @@ export const getNote = async (req, res) => {
       responseNote.userPermission = 'viewer';
     }
 
+    const activeCommentCount = await Comment.countDocuments({ noteId: note._id, isDeleted: false });
+    responseNote.commentCount = activeCommentCount;
+
     res.json(responseNote);
   } catch (error) {
     console.error('Get note error:', error);
@@ -194,18 +213,30 @@ export const getNote = async (req, res) => {
 // Create a new note
 export const createNote = async (req, res) => {
   try {
-    const { title, content, tags, color, isPinned } = req.body;
+    const { title, type, content, checklistItems, tags, color, isPinned } = req.body;
 
     const formattedTags = Array.isArray(tags)
       ? tags.map(t => String(t).trim()).filter(Boolean)
       : [];
 
+    const formattedChecklistItems = Array.isArray(checklistItems)
+      ? checklistItems.map((item, idx) => ({
+        id: item.id || `item-${Date.now()}-${idx}`,
+        text: item.text || '',
+        completed: !!item.completed
+      }))
+      : [];
+
     const note = new Note({
       title: title || 'Untitled Note',
+      type: type === 'checklist' ? 'checklist' : 'text',
       content: content || '',
+      checklistItems: formattedChecklistItems,
       tags: formattedTags,
       color: color || 'default',
       isPinned: !!isPinned,
+      isArchived: false,
+      isTrashed: false,
       createdBy: req.user._id
     });
 
@@ -249,17 +280,30 @@ export const updateNote = async (req, res) => {
       return res.status(403).json({ message: 'Write access denied. You only have viewing permissions.' });
     }
 
-    const { title, content, tags, color, isPinned, isFavorite, isArchived, isTrashed, forceNewVersion, sessionId } = req.body;
+    const { title, type, content, checklistItems, tags, color, isPinned, isFavorite, isArchived, isTrashed, forceNewVersion, sessionId } = req.body;
+
+    // Forbid editing or archiving trashed notes unless explicitly restoring (isTrashed: false)
+    if (note.isTrashed && isTrashed !== false) {
+      return res.status(400).json({ message: 'Cannot edit or archive a note that is in Trash. Restore it first.' });
+    }
 
     const newTitle = title !== undefined ? title.trim() || 'Untitled Note' : note.title;
     const newContent = content !== undefined ? content : note.content;
+    const newType = type !== undefined ? type : (note.type || 'text');
+    const newChecklistItems = checklistItems !== undefined ? checklistItems.map((item, idx) => ({
+      id: item.id || `item-${Date.now()}-${idx}`,
+      text: item.text || '',
+      completed: !!item.completed
+    })) : note.checklistItems;
 
-    // Check if content or title changed meaningfully
-    const hasContentOrTitleChanged = (newTitle !== note.title) || (newContent !== note.content);
+    const isChecklistChanged = checklistItems !== undefined && JSON.stringify(note.checklistItems) !== JSON.stringify(newChecklistItems);
+    const hasChanged = (newTitle !== note.title) || (newContent !== note.content) || (newType !== note.type) || isChecklistChanged;
 
     const updateFields = {};
     if (title !== undefined) updateFields.title = newTitle;
     if (content !== undefined) updateFields.content = newContent;
+    if (type !== undefined) updateFields.type = newType;
+    if (checklistItems !== undefined) updateFields.checklistItems = newChecklistItems;
     if (tags !== undefined && Array.isArray(tags)) {
       updateFields.tags = tags.map(t => String(t).trim()).filter(Boolean);
     }
@@ -268,12 +312,32 @@ export const updateNote = async (req, res) => {
     if (isFavorite !== undefined) updateFields.isFavorite = isFavorite;
 
     if (isArchived !== undefined) {
-      updateFields.isArchived = isArchived;
-      if (isArchived) updateFields.archivedAt = new Date();
+      const boolArchived = Boolean(isArchived);
+      if (boolArchived) {
+        if (note.isTrashed) {
+          return res.status(400).json({ message: 'Cannot archive a note that is in Trash. Restore it first.' });
+        }
+        updateFields.isArchived = true;
+        updateFields.archivedAt = new Date();
+        updateFields.isTrashed = false;
+        updateFields.trashedAt = null;
+      } else {
+        updateFields.isArchived = false;
+        updateFields.archivedAt = null;
+      }
     }
+
     if (isTrashed !== undefined) {
-      updateFields.isTrashed = isTrashed;
-      if (isTrashed) updateFields.trashedAt = new Date();
+      const boolTrashed = Boolean(isTrashed);
+      if (boolTrashed) {
+        updateFields.isTrashed = true;
+        updateFields.trashedAt = new Date();
+        updateFields.isArchived = false;
+        updateFields.archivedAt = null;
+      } else {
+        updateFields.isTrashed = false;
+        updateFields.trashedAt = null;
+      }
     }
 
     updateFields.lastUpdated = new Date();
@@ -286,12 +350,14 @@ export const updateNote = async (req, res) => {
       .populate('createdBy', 'name email _id')
       .populate('collaborators.userId', 'name email _id');
 
-    // Save version snapshot and notify collaborators only if content or title changed
-    if (hasContentOrTitleChanged) {
+    // Save version snapshot and notify collaborators only if content/checklist changed
+    if (hasChanged) {
       await saveNoteVersionAndNotify({
         noteId: updatedNote._id,
         title: updatedNote.title,
         content: updatedNote.content,
+        type: updatedNote.type,
+        checklistItems: updatedNote.checklistItems,
         userId,
         userName: req.user.name,
         changeType: 'updated',
@@ -306,6 +372,8 @@ export const updateNote = async (req, res) => {
           _id: updatedNote._id,
           content: updatedNote.content,
           title: updatedNote.title,
+          type: updatedNote.type,
+          checklistItems: updatedNote.checklistItems,
           tags: updatedNote.tags,
           lastUpdated: updatedNote.lastUpdated,
           updatedBy: {
@@ -348,13 +416,22 @@ export const deleteNote = async (req, res) => {
     if (!note.isTrashed) {
       note.isTrashed = true;
       note.trashedAt = new Date();
+      // Moving to trash removes it from active and archive states
+      note.isArchived = false;
+      note.archivedAt = null;
       await note.save();
       await Reminder.updateMany({ noteId: req.params.id }, { isActive: false });
-      return res.json({ message: 'Note moved to trash', softDeleted: true, noteId: note._id });
+      await note.populate('createdBy', 'name email _id');
+      await note.populate('collaborators.userId', 'name email _id');
+      const resObj = note.toObject();
+      resObj.isOwnedByCurrentUser = true;
+      resObj.userPermission = 'owner';
+      return res.json({ message: 'Note moved to trash', softDeleted: true, noteId: note._id, note: resObj });
     }
 
     // If note is already in trash, delete permanently
     await Reminder.deleteMany({ noteId: req.params.id });
+    await deleteAttachmentsForNote(req.params.id);
     await note.deleteOne();
     res.json({ message: 'Note permanently deleted', softDeleted: false, noteId: req.params.id });
   } catch (error) {
@@ -363,7 +440,7 @@ export const deleteNote = async (req, res) => {
   }
 };
 
-// Restore note from trash or archive
+// Restore note from trash
 export const restoreNote = async (req, res) => {
   try {
     const note = await Note.findById(req.params.id);
@@ -379,6 +456,7 @@ export const restoreNote = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
+    // Restoring from trash returns the note to active state (not archived, not trashed)
     note.isTrashed = false;
     note.trashedAt = null;
     note.isArchived = false;
@@ -393,10 +471,102 @@ export const restoreNote = async (req, res) => {
     await note.populate('createdBy', 'name email _id');
     await note.populate('collaborators.userId', 'name email _id');
 
-    res.json(note);
+    const resObj = note.toObject();
+    resObj.isOwnedByCurrentUser = isCreator;
+    resObj.userPermission = isCreator ? 'owner' : (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor') ? 'editor' : 'viewer');
+
+    res.json(resObj);
   } catch (error) {
     console.error('Restore note error:', error);
     res.status(500).json({ message: 'Error restoring note', error: error.message });
+  }
+};
+
+// Archive note
+export const archiveNote = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const note = await Note.findById(req.params.id);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const userId = req.user._id;
+    const isCreator = safeIdEquals(note.createdBy, userId);
+    const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, userId));
+    const canWrite = isCreator || (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor'));
+
+    if (!canWrite) {
+      return res.status(403).json({ message: 'Write access denied. You only have viewing permissions.' });
+    }
+
+    if (note.isTrashed) {
+      return res.status(400).json({ message: 'Cannot archive a note that is in Trash. Restore it first.' });
+    }
+
+    note.isArchived = true;
+    note.archivedAt = new Date();
+    note.isTrashed = false;
+    note.trashedAt = null;
+    note.lastUpdated = new Date();
+
+    await note.save();
+    await note.populate('createdBy', 'name email _id');
+    await note.populate('collaborators.userId', 'name email _id');
+
+    const resObj = note.toObject();
+    resObj.isOwnedByCurrentUser = isCreator;
+    resObj.userPermission = isCreator ? 'owner' : (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor') ? 'editor' : 'viewer');
+
+    res.json(resObj);
+  } catch (error) {
+    console.error('Archive note error:', error);
+    res.status(500).json({ message: 'Error archiving note', error: error.message });
+  }
+};
+
+// Unarchive note
+export const unarchiveNote = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const note = await Note.findById(req.params.id);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    const userId = req.user._id;
+    const isCreator = safeIdEquals(note.createdBy, userId);
+    const collaborator = note.collaborators.find(c => c.userId && safeIdEquals(c.userId, userId));
+    const canWrite = isCreator || (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor'));
+
+    if (!canWrite) {
+      return res.status(403).json({ message: 'Write access denied. You only have viewing permissions.' });
+    }
+
+    note.isArchived = false;
+    note.archivedAt = null;
+    note.isTrashed = false;
+    note.trashedAt = null;
+    note.lastUpdated = new Date();
+
+    await note.save();
+    await note.populate('createdBy', 'name email _id');
+    await note.populate('collaborators.userId', 'name email _id');
+
+    const resObj = note.toObject();
+    resObj.isOwnedByCurrentUser = isCreator;
+    resObj.userPermission = isCreator ? 'owner' : (collaborator && (collaborator.permission === 'write' || collaborator.permission === 'editor') ? 'editor' : 'viewer');
+
+    res.json(resObj);
+  } catch (error) {
+    console.error('Unarchive note error:', error);
+    res.status(500).json({ message: 'Error unarchiving note', error: error.message });
   }
 };
 
@@ -404,6 +574,13 @@ export const restoreNote = async (req, res) => {
 export const emptyTrash = async (req, res) => {
   try {
     const userId = req.user._id;
+    // Find the notes that will be deleted so we can clean up their attachments
+    const notesToDelete = await Note.find({ createdBy: userId, isTrashed: true }).select('_id');
+    const noteIds = notesToDelete.map(n => n._id);
+
+    // Clean up attachments for every trashed note (best-effort, non-blocking)
+    await Promise.allSettled(noteIds.map(id => deleteAttachmentsForNote(id)));
+
     const result = await Note.deleteMany({
       createdBy: userId,
       isTrashed: true
@@ -665,9 +842,11 @@ export const restoreNoteVersion = async (req, res) => {
       return res.status(404).json({ message: 'Version to restore not found' });
     }
 
-    // 1. Update current note content and title
+    // 1. Update current note content, title, type, and checklistItems
     note.title = targetVersion.title || 'Untitled Note';
     note.content = targetVersion.content || '';
+    note.type = targetVersion.type || 'text';
+    note.checklistItems = targetVersion.checklistItems || [];
     note.lastUpdated = new Date();
     await note.save();
 
@@ -677,6 +856,8 @@ export const restoreNoteVersion = async (req, res) => {
       noteId: id,
       title: note.title,
       content: note.content,
+      type: note.type,
+      checklistItems: note.checklistItems,
       editedBy: userId,
       versionNumber: versionCount + 1,
       changeType: 'restored'
@@ -700,6 +881,8 @@ export const restoreNoteVersion = async (req, res) => {
         _id: id,
         content: note.content,
         title: note.title,
+        type: note.type,
+        checklistItems: note.checklistItems,
         tags: note.tags,
         lastUpdated: note.lastUpdated,
         updatedBy: {

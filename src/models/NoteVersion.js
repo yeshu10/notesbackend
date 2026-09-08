@@ -12,10 +12,20 @@ const noteVersionSchema = new mongoose.Schema({
         default: 'Untitled Note',
         trim: true
     },
+    type: {
+        type: String,
+        enum: ['text', 'checklist'],
+        default: 'text'
+    },
     content: {
         type: String,
         default: ''
     },
+    checklistItems: [{
+        id: { type: String },
+        text: { type: String, default: '' },
+        completed: { type: Boolean, default: false }
+    }],
     editedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

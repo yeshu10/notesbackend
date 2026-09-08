@@ -8,9 +8,12 @@ import dotenv from 'dotenv';
 import connectDB from './config/db.js';
 import authRoutes from './routes/auth.js';
 import noteRoutes from './routes/notes.js';
+import commentRoutes from './routes/commentRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import reminderRoutes from './routes/reminderRoutes.js';
 import { socketHandler, initializeSocket } from './socket/handler.js';
+import attachmentNoteRoutes from './routes/attachmentNoteRoutes.js';
+import attachmentRoutes from './routes/attachmentRoutes.js';
 import { initializeArchiver } from './cron/noteArchiver.js';
 import { initializeReminderScheduler } from './cron/reminderScheduler.js';
 import { globalLimiter } from './middleware/rateLimiter.js';
@@ -136,8 +139,12 @@ app.get('/', (req, res) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/notes', noteRoutes);
+app.use('/api/notes', commentRoutes);
+app.use('/api/comments', commentRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/reminders', reminderRoutes);
+app.use('/api/notes', attachmentNoteRoutes);
+app.use('/api/attachments', attachmentRoutes);
 
 // 404 handler for unmatched routes
 

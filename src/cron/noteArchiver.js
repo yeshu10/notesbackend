@@ -10,7 +10,8 @@ const archiveOldNotes = async () => {
         const result = await Note.updateMany(
             {
                 lastUpdated: { $lt: thirtyDaysAgo },
-                isArchived: false
+                isArchived: false,
+                isTrashed: false
             },
             {
                 $set: { 
